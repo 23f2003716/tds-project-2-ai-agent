@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+
+# Virtual environments
+.env
+.venv
+
+# IDE
+.vscode/
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+docs/
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.log
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Environment files (except example)
+.env
+!.env.example
+
+# Generated files during development
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.csv
+*.xlsx
+*.json
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
