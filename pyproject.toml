@@ -5,12 +5,8 @@ requires-python = ">=3.13"
 dependencies = [
     "crawl4ai>=0.7.2",
     "fastapi>=0.116.1",
-    "matplotlib>=3.10.5",
+    "google-genai>=1.29.0",
     "pandas>=2.3.1",
-    "plotly>=6.2.0",
-    "pydantic-ai[logfire]>=0.6.0",
-    "pypdf2>=3.0.1",
-    "scikit-learn>=1.7.1",
-    "seaborn>=0.13.2",
+    "python-multipart>=0.0.20",
     "uvicorn>=0.35.0",
 ]

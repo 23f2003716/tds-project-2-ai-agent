@@ -1,370 +1,307 @@
 import os
+import re
 import json
+import logging
 import asyncio
-from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
 from pathlib import Path
-import tempfile
-import warnings
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+
+from random import randint
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from pydantic_ai import Agent
-from pydantic_ai.models.google import GoogleModel
-from pydantic_ai.providers.google import GoogleProvider
-from pydantic_ai.usage import UsageLimits
-import logfire
-from dotenv import load_dotenv
+import uvicorn
 
-from agent_tools import (
-    DataAnalystDeps,
-    setup_web_scraping_tool,
-    setup_code_generation_tool
+from google import genai
+from google.genai import types
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+
+# Setup logging
+logs_dir = Path("logs")
+logs_dir.mkdir(exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(logs_dir / f'api_{datetime.now().strftime("%Y%m%d")}.log'),
+        logging.StreamHandler()
+    ]
 )
+logger = logging.getLogger(__name__)
 
-load_dotenv()
-logfire.configure(token=os.getenv("LOGFIRE_TOKEN"))
-warnings.filterwarnings("ignore")
-# Initialize FastAPI app
-app = FastAPI(title="Data Analyst Agent API", version="1.0.0")
+# Create uploads directory
+uploads_dir = Path("uploads")
+uploads_dir.mkdir(exist_ok=True)
 
-# Google GenAI model setup
-provider = GoogleProvider(api_key=os.getenv("GEMINI_API_KEY"))
-google_model = GoogleModel(model_name="gemini-2.5-flash", provider=provider)
+# Initialize Gemini client
+GEMINI_API_KEY = os.getenv(f"GEMINI_API_KEY_{randint(0, 1)}")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Response models
-class AnalysisResponse(BaseModel):
-    task_id: str = Field(description="Unique task identifier")
-    status: str = Field(description="Task status: success, error, or partial")
-    results: Dict[str, Any] = Field(description="Analysis results")
-    visualizations: List[str] = Field(default=[], description="Paths to generated visualizations")
-    code_generated: Optional[str] = Field(default=None, description="Generated code for the analysis")
-    data_files: List[str] = Field(default=[], description="Processed data file paths")
-    error_message: Optional[str] = Field(default=None, description="Error description if failed")
+app = FastAPI(title="Data Analyst Agent", version="1.0.0")
 
-# Initialize the Data Analyst Agent
-data_analyst_agent = Agent(
-    model=google_model,
-    deps_type=DataAnalystDeps,
-    output_type=AnalysisResponse,
-    system_prompt="""You are an expert Data Analyst Agent capable of:
-    1. Web scraping and data collection from any source
-    2. Data preprocessing, cleaning, and transformation
-    3. Statistical analysis and modeling
-    4. Data visualization creation
-    5. Dynamic code generation for custom analysis tasks
+
+class DataAnalystAgent:
+    def __init__(self):
+        self.uploads_dir = uploads_dir
+        self.url_pattern = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
+        
+    async def extract_urls_from_questions(self, questions_content: str) -> List[str]:
+        """Extract URLs from questions.txt content"""
+        urls = self.url_pattern.findall(questions_content)
+        logger.info(f"Found {len(urls)} URLs in questions: {urls}")
+        return urls
     
-    You have access to powerful tools for web scraping (Crawl4AI), data processing (pandas, numpy), 
-    visualization (matplotlib, plotly, seaborn), and can generate and execute Python code dynamically.
+    async def scrape_url_content(self, url: str) -> str:
+        """Scrape content from URL using crawl4ai"""
+        try:
+            logger.info(f"Scraping URL: {url}")
+            
+            browser_config = BrowserConfig(headless=True, verbose=False)
+            
+            crawl_config = CrawlerRunConfig(
+                word_count_threshold=15,
+                extraction_strategy="NoExtractionStrategy",
+                chunking_strategy="RegexChunking",
+                cache_mode=CacheMode.BYPASS
+            )
+            
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                result = await crawler.arun(
+                    url=url,
+                    config=crawl_config
+                )
+                
+                if result.success:
+                    content = result.markdown or result.cleaned_html or result.html
+                    logger.info(f"Successfully scraped {len(content)} characters from {url}")
+                    return content
+                else:
+                    logger.error(f"Failed to scrape {url}: {result.error_message}")
+                    return f"Error scraping {url}: {result.error_message}"
+                    
+        except Exception as e:
+            logger.error(f"Exception while scraping {url}: {str(e)}")
+            return f"Error scraping {url}: {str(e)}"
     
-    Always provide comprehensive analysis with clear insights, appropriate visualizations, 
-    and well-documented code. Handle errors gracefully and provide alternative approaches when needed.
+    async def process_scraped_content(self, url: str, raw_content: str, questions_content: str) -> str:
+        """Use Gemini 2.5 Flash to extract relevant content from scraped data"""
+        try:
+            prompt = f"""
+                    You are a data extraction specialist. I have scraped content from {url} and need to answer specific questions.
+
+                    QUESTIONS TO ANSWER:
+                    {questions_content}
+
+                    Your task: Extract and clean only the data that is relevant to answering the questions above. 
+                    - Remove unnecessary HTML, navigation, ads, etc.
+                    - Keep data in a structured format (tables, lists, etc.)
+                    - Focus only on content needed to answer the questions
+                    - Do not solve the questions yet, just extract the relevant data
+                    - Return the cleaned data in a format suitable for analysis
+
+                    Provide clean, structured data only:
+
+                    SCRAPED CONTENT:
+                    {raw_content}
+                    """
+            
+            logger.info(f"Processing scraped content with Gemini 2.5 Flash for {url}")
+            
+            response = await client.aio.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1
+                )
+            )
+            
+            cleaned_content = response.text
+            logger.info(f"Processed content: {len(cleaned_content)} characters")
+            return cleaned_content
+            
+        except Exception as e:
+            logger.error(f"Error processing scraped content: {str(e)}")
+            return raw_content  # Fallback to raw content
     
-    Your responses should be professional, accurate, and actionable for business decision-making.""",
-    instrument=True,
+    async def save_scraped_file(self, url: str, content: str) -> str:
+        """Save scraped content to file"""
+        # Create safe filename from URL
+        safe_name = re.sub(r'[^\w\-_.]', '_', url.replace('https://', '').replace('http://', ''))
+        filename = f"scraped_{safe_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        filepath = self.uploads_dir / filename
+        
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(f"URL: {url}\n\n{content}")
+            logger.info(f"Saved scraped content to {filepath}")
+            return str(filepath)
+        except Exception as e:
+            logger.error(f"Error saving scraped file: {str(e)}")
+            raise
+    
+    async def analyze_with_gemini(self, questions_content: str, file_paths: List[str]) -> str:
+        """Analyze all files with Gemini 2.5 Pro"""
+        try:
+            logger.info(f"Analyzing {len(file_paths)} files with Gemini 2.5 Pro")
+            
+            # Upload files to Gemini
+            uploaded_files = []
+            for file_path in file_paths:
+                if os.path.exists(file_path):
+                    try:
+                        uploaded_file = client.files.upload(file=file_path)
+                        uploaded_files.append(uploaded_file)
+                        logger.info(f"Uploaded file: {file_path}")
+                    except Exception as e:
+                        logger.error(f"Error uploading {file_path}: {str(e)}")
+            
+            # Prepare content for analysis
+            contents = [questions_content]
+            contents.extend(uploaded_files)
 
-)
+            prompt = """
+                    You are a world-class data analyst AI. Your purpose is to write robust, production-quality Python code to solve a user's question based on the data files they provide. 
+                    You must follow these instructions meticulously:\n
+                    1.  **Analyze the Request:** Carefully read the user's question and examine the previews of all provided files (text, CSV, images, etc.) to understand the context and requirements fully.
+                    2.  **Think Step-by-Step:** Before writing code, formulate a clear plan. If links and scraping is mentioned, scraped data is already uploaded to you. Do NOT scrape anything. Consider data loading, necessary cleaning (handling missing values, correcting data types, ensuring case consistency), analysis steps, and the final output format.
+                    3.  **Write High-Quality Python Code:
+                        - The code must be pure Python and executable. Assume standard libraries like `pandas`, `matplotlib`, `numpy`, and `base64` are available.
+                        - Refer to files by their exact filenames as provided (e.g., `sample-sales.csv`). Do not invent or assume file paths, instead robustly implement finding the filepath by filename to avoid FileNotFoundError.
+                        - **Crucial:** Perform data cleaning and preprocessing. Do not make assumptions about data quality. Check for and handle inconsistencies.
+                        - Your code must print the final answer(s) to standard output. The output format must precisely match what the user requested.
+                        - If the question requires creating a plot or image, you MUST save it to a file (e.g., `plot.png`) and then print its base64 data URI to standard output (e.g., `print(f'data:image/png;base64,{base64_string}')`).
+                    4.  **Final Output:** Your response MUST contain ONLY the raw Python code. Do not include any explanations, comments, or markdown formatting like ```python ... ```. Just the code itself.
+                    """
+            
+            # Generate response
+            response = await client.aio.models.generate_content(
+                model='gemini-2.5-pro',
+                contents=[prompt, contents],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    # max_output_tokens=8000,
+                    tools=[types.Tool(code_execution=types.ToolCodeExecution)]
+                )
+            )
+            
+            result = response.text
+            logger.info(f"Analysis complete: {len(result)} characters")
+            
+            # Cleanup uploaded files
+            for uploaded_file in uploaded_files:
+                try:
+                    client.files.delete(name=uploaded_file.name)
+                except:
+                    pass  # Ignore cleanup errors
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error in Gemini analysis: {str(e)}")
+            raise
+    
+    async def process_request(self, questions_file: UploadFile, additional_files: List[UploadFile]) -> Dict[str, Any]:
+        """Main processing pipeline"""
+        try:
+            # Save questions file and read content
+            questions_path = self.uploads_dir / f"questions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            with open(questions_path, 'wb') as f:
+                content = await questions_file.read()
+                f.write(content)
+            
+            questions_content = content.decode('utf-8')
+            logger.info(f"Saved questions file: {questions_path}")
+            
+            # Save additional files
+            saved_files = [str(questions_path)]
+            for file in additional_files:
+                file_path = self.uploads_dir / f"{file.filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                with open(file_path, 'wb') as f:
+                    f.write(await file.read())
+                saved_files.append(str(file_path))
+                logger.info(f"Saved additional file: {file_path}")
+            
+            # Check for URLs in questions and scrape if needed
+            urls = await self.extract_urls_from_questions(questions_content)
+            
+            if urls:
+                logger.info(f"Found URLs, starting scraping process")
+                for url in urls:
+                    try:
+                        # Scrape raw content
+                        raw_content = await self.scrape_url_content(url)
+                        
+                        # Process with Gemini 2.5 Flash
+                        cleaned_content = await self.process_scraped_content(url, raw_content, questions_content)
+                        
+                        # Save processed content
+                        scraped_file_path = await self.save_scraped_file(url, cleaned_content)
+                        saved_files.append(scraped_file_path)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing URL {url}: {str(e)}")
+                        continue
+            
+            # Analyze all files with Gemini 2.5 Pro
+            result = await self.analyze_with_gemini(questions_content, saved_files)
+            
+            # Try to parse as JSON, fall back to text if not valid JSON
+            try:
+                json_result = json.loads(result)
+                return {"status": "success", "result": json_result}
+            except json.JSONDecodeError:
+                return {"status": "success", "result": result}
+                
+        except Exception as e:
+            logger.error(f"Error in process_request: {str(e)}")
+            return {"status": "error", "error": str(e)}
 
-# Register tools with the agent
-setup_web_scraping_tool(data_analyst_agent)
-setup_code_generation_tool(data_analyst_agent)
 
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {"message": "Data Analyst Agent API is running", "version": "1.0.0"}
+# Initialize agent
+agent = DataAnalystAgent()
 
 
 @app.post("/api/")
-async def analyze_data(files: List[UploadFile] = File(...)):
+async def analyze_data(
+    questions_file: UploadFile = File(alias="questions.txt"),
+    files: List[UploadFile] = File(default=[])):
     """
-    Main endpoint for data analysis tasks.
-    
-    Expects files with any names, but looks for:
-    - questions.txt (or any .txt file) containing analysis questions/tasks
-    - Any other files (.csv, .xlsx, .json, etc.) as data files
-    
-    Args:
-        files: List of uploaded files including questions.txt and optional data files
-    
-    Returns:
-        AnalysisResponse: Complete analysis results with visualizations and code
+    Main endpoint for data analysis
+    Expects questions.txt and optional additional files
     """
     try:
-        # Create temporary directory for this analysis session
-        temp_dir = Path(tempfile.mkdtemp(prefix="data_analyst_"))
+
+        if not questions_file:
+            raise HTTPException(status_code=400, detail="questions.txt file is required")
         
-        # Separate questions file from data files
-        questions_content = ""
-        uploaded_file_paths = []
+        logger.info(f"Processing request with {len(files)} additional files")
         
-        for file in files:
-            if not file.filename:
-                continue
-                
-            # Read file content
-            content = await file.read()
-            file_path = temp_dir / file.filename
-            
-            # Save file to disk
-            with open(file_path, 'wb') as f:
-                f.write(content)
-            
-            # Check if this is the questions file
-            if (file.filename.lower().endswith('.txt') or 
-                'question' in file.filename.lower()):
-                # This is likely the questions file
-                try:
-                    questions_content = content.decode('utf-8').strip()
-                except UnicodeDecodeError:
-                    # If it fails to decode, treat as a regular data file
-                    uploaded_file_paths.append(str(file_path))
-            else:
-                # This is a data file
-                uploaded_file_paths.append(str(file_path))
-        
-        if not questions_content:
-            raise HTTPException(
-                status_code=400, 
-                detail="No questions file found. Please upload a .txt file with analysis questions."
-            )
-        
-        # Create dependencies object
-        deps = DataAnalystDeps(
-            temp_dir=str(temp_dir),
-            uploaded_files=uploaded_file_paths,
-            task_id=f"task_{id(temp_dir)}"
+        # Process with timeout (3 minutes)
+        result = await asyncio.wait_for(
+            agent.process_request(questions_file, files),
+            timeout=180
         )
         
-        # Run the agent with the analysis task
-        result = await data_analyst_agent.run(
-            user_prompt=f"""
-            Please analyze the following data analysis request:
-            
-            {questions_content}
-            
-            Available data files: {uploaded_file_paths if uploaded_file_paths else 'None - you may need to collect data from web sources'}
-            
-            Provide a comprehensive analysis including:
-            1. Data collection (if needed)
-            2. Data preprocessing and cleaning
-            3. Exploratory data analysis
-            4. Statistical analysis/modeling (if applicable)
-            5. Visualizations to support insights
-            6. Generated code for reproducibility
-            7. Clear business insights and recommendations
-            """,
-            deps=deps,
-            usage_limits=UsageLimits(request_limit=5)
+        return JSONResponse(content=result)
+        
+    except asyncio.TimeoutError:
+        logger.error("Request timed out after 3 minutes")
+        return JSONResponse(
+            content={"status": "error", "error": "Request timed out after 3 minutes"},
+            status_code=408
         )
-        
-        return result.data
-        
     except Exception as e:
-        # Clean up temporary directory on error
-        if 'temp_dir' in locals():
-            import shutil
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
-        
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Analysis failed: {str(e)}"
+        logger.error(f"Unexpected error: {str(e)}")
+        return JSONResponse(
+            content={"status": "error", "error": str(e)},
+            status_code=500
         )
 
 
-@app.post("/api/simple")
-async def analyze_simple(
-    questions_txt: UploadFile = File(alias="questions.txt"),
-    data_files: List[UploadFile] = File(default=[])
-):
-    """
-    Alternative endpoint with explicit parameter names for curl usage.
-    
-    Usage:
-    curl "http://localhost:8000/api/simple" -F "questions.txt=@questions.txt" -F "data_files=@data.csv"
-    
-    Args:
-        questions_txt: Text file containing analysis questions/tasks
-        data_files: Optional list of data files to analyze
-    
-    Returns:
-        AnalysisResponse: Complete analysis results with visualizations and code
-    """
-    try:
-        # Create temporary directory for this analysis session
-        temp_dir = Path(tempfile.mkdtemp(prefix="data_analyst_"))
-        
-        # Read questions from uploaded file
-        questions_content = await questions_txt.read()
-        task_description = questions_content.decode('utf-8').strip()
-        
-        if not task_description:
-            raise HTTPException(status_code=400, detail="Questions file is empty")
-        
-        # Save uploaded files and get their paths
-        uploaded_file_paths = []
-        for file in data_files:
-            if file.filename:
-                file_path = temp_dir / file.filename
-                with open(file_path, 'wb') as f:
-                    content = await file.read()
-                    f.write(content)
-                uploaded_file_paths.append(str(file_path))
-        
-        # Create dependencies object
-        deps = DataAnalystDeps(
-            temp_dir=str(temp_dir),
-            uploaded_files=uploaded_file_paths,
-            task_id=f"task_{id(temp_dir)}"
-        )
-        
-        # Run the agent with the analysis task
-        result = await data_analyst_agent.run(
-            user_prompt=f"""
-            Please analyze the following data analysis request:
-            
-            {task_description}
-            
-            Available data files: {uploaded_file_paths if uploaded_file_paths else 'None - you may need to collect data from web sources'}
-            
-            Provide a comprehensive analysis including:
-            1. Data collection (if needed)
-            2. Data preprocessing and cleaning
-            3. Exploratory data analysis
-            4. Statistical analysis/modeling (if applicable)
-            5. Visualizations to support insights
-            6. Generated code for reproducibility
-            7. Clear business insights and recommendations
-            """,
-            deps=deps,
-            usage_limits=UsageLimits(request_limit=5)
-        )
-        
-        return result.data
-        
-    except Exception as e:
-        # Clean up temporary directory on error
-        if 'temp_dir' in locals():
-            import shutil
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
-        
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Analysis failed: {str(e)}"
-        )
+@app.get("/")
+async def home():
+    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
 
-@app.post("/api/web-scrape", response_model=Dict[str, Any])
-async def web_scrape_endpoint(
-    url: str = Form(..., description="URL to scrape"),
-    query: str = Form(default="", description="Specific query for targeted scraping"),
-    format: str = Form(default="markdown", description="Output format: markdown, json, text")
-):
-    """
-    Dedicated web scraping endpoint
-    
-    Args:
-        url: The URL to scrape
-        query: Optional query for targeted content extraction
-        format: Output format preference
-    
-    Returns:
-        Dict containing scraped data and metadata
-    """
-    try:
-        temp_dir = Path(tempfile.mkdtemp(prefix="web_scraper_"))
-        
-        deps = DataAnalystDeps(
-            temp_dir=str(temp_dir),
-            uploaded_files=[],
-            task_id=f"scrape_{id(temp_dir)}"
-        )
-        
-        prompt = f"""
-        Please scrape the following URL and extract relevant data:
-        URL: {url}
-        Query: {query if query else 'Extract all meaningful content'}
-        Format: {format}
-        
-        Return the scraped data in a structured format with metadata about the extraction.
-        """
-        
-        result = await data_analyst_agent.run(user_prompt=prompt, deps=deps, usage_limits=UsageLimits(request_limit=5))
-        
-        return {
-            "status": "success",
-            "data": result.data.results,
-            "url": url,
-            "query": query,
-            "format": format
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Web scraping failed: {str(e)}"
-        )
-
-@app.post("/api/generate-code")
-async def generate_code_endpoint(
-    task_description: str = Form(..., description="Description of the code to generate"),
-    language: str = Form(default="python", description="Programming language"),
-    include_example: bool = Form(default=True, description="Include example usage")
-):
-    """
-    Code generation endpoint
-    
-    Args:
-        task_description: What the code should accomplish
-        language: Programming language (default: python)
-        include_example: Whether to include example usage
-    
-    Returns:
-        Dict containing generated code and explanation
-    """
-    try:
-        temp_dir = Path(tempfile.mkdtemp(prefix="code_gen_"))
-        
-        deps = DataAnalystDeps(
-            temp_dir=str(temp_dir),
-            uploaded_files=[],
-            task_id=f"codegen_{id(temp_dir)}"
-        )
-        
-        prompt = f"""
-        Generate {language} code for the following task:
-        {task_description}
-        
-        Requirements:
-        - Include proper error handling
-        - Add clear documentation/comments
-        - Follow best practices
-        - {'Include example usage' if include_example else 'No example needed'}
-        
-        Return the code with explanation of how it works.
-        """
-        
-        result = await data_analyst_agent.run(user_prompt=prompt, deps=deps, usage_limits=UsageLimits(request_limit=5))
-        
-        return {
-            "status": "success",
-            "code": result.data.code_generated,
-            "explanation": result.data.results,
-            "language": language,
-            "task": task_description
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Code generation failed: {str(e)}"
-        )
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="info")

@@ -11,6 +11,5 @@ services:
     env_file:
       - .env
     volumes:
-      - ./logs:/app/logs
+      - ./uploads:/app/uploads
       - ./temp:/app/temp
-    # restart: unless-stopped
