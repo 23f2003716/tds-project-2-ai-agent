@@ -23,14 +23,14 @@ RUN export PATH="$(pwd)/.venv/bin:$PATH"
 COPY . .
 
 # Create necessary directories for the application
-RUN mkdir -p logs uploads
+RUN mkdir -p logs uploads temp
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # Set up playwright for Crawl4AI
-RUN uv run playwright install --with-deps --only-shell chromium
+RUN uv run playwright install --with-deps chromium
 
 EXPOSE 8000
 
