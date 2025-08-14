@@ -3,9 +3,9 @@ name = "tds-project-2-ai-agent"
 version = "0.1.0"
 requires-python = ">=3.13"
 dependencies = [
-    "crawl4ai>=0.7.2",
+    "crawl4ai>=0.7.3",
     "fastapi>=0.116.1",
-    "google-genai>=1.29.0",
+    "google-genai>=1.30.0",
     "pandas>=2.3.1",
     "python-multipart>=0.0.20",
     "uvicorn>=0.35.0",

@@ -1,4 +1,4 @@
-FROM python:3.13-slim
+FROM astral/uv:python3.13-bookworm-slim
 
 WORKDIR /app
 
@@ -6,15 +6,6 @@ RUN apt-get update && apt-get install -y curl gcc g++ ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
-
-# Download the latest installer
-ADD https://astral.sh/uv/install.sh /uv-installer.sh
-
-# Run the installer then remove it
-RUN sh /uv-installer.sh && rm /uv-installer.sh
-
-# Ensure the installed binary is on the `PATH`
-ENV PATH="/root/.local/bin/:$PATH"
 
 RUN uv sync
 
@@ -28,6 +19,7 @@ RUN mkdir -p logs uploads temp
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONWARNINGS="ignore::SyntaxWarning"
 
 # Set up playwright for Crawl4AI
 RUN uv run playwright install --with-deps chromium

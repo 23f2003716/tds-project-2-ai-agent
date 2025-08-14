@@ -1,6 +1,7 @@
 import asyncio
 import uvicorn
-from agents import DataAnalystAgent, logger
+from agents import DataAnalystAgent
+from config import logger
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -30,16 +31,14 @@ async def analyze_data(request: Request):
         if not form:
             raise HTTPException(status_code=400, detail="No files uploaded")
 
-        # Extract all uploaded files
         files = []
-        for key, value in form.items():
+        for _, value in form.items():
             if hasattr(value, 'filename') and value.filename:
                 files.append(value)
 
         if not files:
             raise HTTPException(status_code=400, detail="At least one file is required")
 
-        # Find questions file
         questions_file = None
         data_files = []
 
@@ -52,20 +51,18 @@ async def analyze_data(request: Request):
         if not questions_file:
             raise HTTPException(status_code=400, detail="questions.txt file is required")
 
-        logger.info(f"Processing request with questions file: {questions_file.filename}")
-        logger.info(f"Additional data files: {[f.filename for f in data_files]}")
+        logger.info(f"Processing request for {questions_file.filename} with data files: {[f.filename for f in data_files]}")
 
-        # Process with timeout (3 minutes)
         result = await asyncio.wait_for(
             agent.process_request(questions_file, data_files),
-            timeout=180
+            timeout=240
         )
 
         return JSONResponse(content=result)
 
     except asyncio.TimeoutError:
-        logger.error("Request timed out after 3 minutes")
-        return JSONResponse(content={"error": "Request timed out after 3 mins"}, status_code=408)
+        logger.error("Request timed out after 4 minutes")
+        return JSONResponse(content={"error": "Request timed out after 4 mins"}, status_code=408)
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
