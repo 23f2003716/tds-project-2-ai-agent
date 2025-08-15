@@ -110,7 +110,7 @@ class DataAnalystAgent:
             logger.info(f"Processing scraped content with Gemini for {url}")
 
             response = await client.aio.models.generate_content(
-                model='gemini-2.0-flash',
+                model='gemini-2.5-flash',
                 contents=prompt,
                 config=types.GenerateContentConfig(temperature=0.1)
             )
@@ -261,7 +261,7 @@ class DataAnalystAgent:
                 cwd=str(self.temp_dir),
                 capture_output=True,
                 text=True,
-                timeout=90
+                timeout=120
             )
 
             if result.returncode == 0:
@@ -304,7 +304,17 @@ class DataAnalystAgent:
 
                 logger.info(f"Analyzing {len(file_names)} files with Gemini (attempt {attempt + 1}/{max_retries})")
 
-                prompt = analysis_prompt(questions_content, file_names, error_context)
+                system_prompt = analysis_prompt().strip()
+
+                prompt = f"""
+                        QUESTIONS TO ANSWER:
+                        {questions_content}
+
+                        EXACT FILE NAMES:
+                        {file_names}
+
+                        {error_context}
+                        """
 
                 contents = []
                 if prompt and prompt.strip():
@@ -313,10 +323,11 @@ class DataAnalystAgent:
                     contents.extend(uploaded_files)
 
                 response = await client.aio.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-2.5-pro',
                     contents=contents,
                     config=types.GenerateContentConfig(
-                        temperature=0.1,
+                        temperature=0,
+                        system_instruction=system_prompt,
                         thinking_config=types.ThinkingConfig(thinking_budget=-1)
                     )
                 )
@@ -391,7 +402,7 @@ class DataAnalystAgent:
                 scraped_results = await self.scrape_urls_parallel(urls, questions_content)
                 saved_files.extend(scraped_results)
 
-            result = await self.analyze_with_gemini(questions_content, saved_files, max_retries=3)
+            result = await self.analyze_with_gemini(questions_content, saved_files, max_retries=2)
 
             if result.get("success", False):
                 return result["result"]
