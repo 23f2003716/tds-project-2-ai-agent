@@ -1,7 +1,7 @@
 import asyncio
 import uvicorn
 from agents import DataAnalystAgent
-from config import logger
+from config import logger, ist
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -55,7 +55,7 @@ async def analyze_data(request: Request):
 
         result = await asyncio.wait_for(
             agent.process_request(questions_file, data_files),
-            timeout=240
+            timeout=280
         )
 
         return JSONResponse(content=result)
@@ -70,8 +70,8 @@ async def analyze_data(request: Request):
 
 @app.get("/")
 async def home():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+    return {"status": "healthy", "timestamp": datetime.now(ist).strftime("%d-%m-%y %I:%M:%S %p")}
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=7860, log_level="info")

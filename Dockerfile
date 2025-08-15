@@ -24,6 +24,6 @@ ENV PYTHONWARNINGS="ignore::SyntaxWarning"
 # Set up playwright for Crawl4AI
 RUN uv run playwright install --with-deps chromium
 
-EXPOSE 8000
+EXPOSE 7860
 
 CMD ["uv", "run", "main.py"]
